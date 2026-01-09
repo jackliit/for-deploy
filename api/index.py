@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import os
 import json
+import requests
 from supabase import create_client, Client
 
 class handler(BaseHTTPRequestHandler):
@@ -44,6 +45,7 @@ class handler(BaseHTTPRequestHandler):
             <body>
                 <h1>統一編號查詢 API</h1>
                 <p>這是一個公開的統一編號查詢服務。您可以使用統一編號或單位名稱進行查詢。</p>
+                <p><strong>查詢順序：</strong> 優先查詢經濟部商業司資料，若無則查詢自建資料庫 (學校、機關等)。</p>
                 
                 <div class="endpoint">
                     <h3>使用方式</h3>
@@ -62,7 +64,51 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(html_content.encode('utf-8'))
             return
 
-        # 若有參數，執行查詢
+        # --- 優先查詢政府開放資料 (僅限統編查詢) ---
+        found_in_govt = False
+        govt_data = []
+        
+        if id_param:
+            try:
+                # 經濟部商業司 API
+                govt_url = 'https://data.gcis.nat.gov.tw/od/data/api/9D17AE0D-09B5-4732-A8F4-81ADED04B679'
+                params = {
+                    '$format': 'json',
+                    '$filter': f'Business_Accounting_NO eq {id_param}',
+                    '$skip': 0,
+                    '$top': 1
+                }
+                # 增加 timeout 避免卡住
+                gov_response = requests.get(govt_url, params=params, timeout=5)
+                
+                if gov_response.status_code == 200:
+                    json_data = gov_response.json()
+                    if isinstance(json_data, list) and len(json_data) > 0:
+                        item = json_data[0]
+                        comp_name = item.get('Company_Name') or item.get('Business_Name')
+                        if comp_name:
+                            govt_data.append({
+                                "統一編號": id_param,
+                                "單位名稱": comp_name,
+                                "資料來源": "經濟部商業司"
+                            })
+                            found_in_govt = True
+            except Exception as e:
+                # 若外部 API 失敗，則忽略，繼續查本地 DB
+                print(f"Govt API Error: {e}")
+                pass
+
+        if found_in_govt:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            result = { "data": govt_data, "error": None }
+            self.wfile.write(json.dumps(result, ensure_ascii=False).encode())
+            return
+
+
+        # --- 若政府資料查不到，查詢 Supabase ---
         if not url or not key:
             self.send_response(500)
             self.end_headers()
