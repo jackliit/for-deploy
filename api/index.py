@@ -71,7 +71,7 @@ class handler(BaseHTTPRequestHandler):
                 <script>
                     async function doBulkQuery() {
                         const input = document.getElementById('bulkInput').value;
-                        const ids = input.split(/[\\n,]+/).map(x => x.trim()).filter(x => x);
+                        const ids = input.replace(/[\\n\\r]+/g, ",").split(",").map(x => x.trim()).filter(x => x);
                         
                         if (ids.length === 0) {
                             alert("請輸入至少一個統一編號");
