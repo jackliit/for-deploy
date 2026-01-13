@@ -18,6 +18,7 @@ class handler(BaseHTTPRequestHandler):
         # 支援參數: id / 統一編號, name / 單位名稱
         id_param = query_components.get('id', [None])[0] or query_components.get('統一編號', [None])[0]
         name_param = query_components.get('name', [None])[0] or query_components.get('單位名稱', [None])[0]
+        skip_govt_param = query_components.get('skip_govt', ['false'])[0].lower() == 'true'
 
         # 如果沒有提供參數，回傳 HTML 說明頁面
         if not id_param and not name_param:
@@ -57,7 +58,8 @@ class handler(BaseHTTPRequestHandler):
                     <h3>多筆查詢 (GUI)</h3>
                     <p>輸入多個統一編號 (每行一個)，一次查詢：</p>
                     <textarea id="bulkInput" rows="10" style="width: 100%; padding: 10px; margin-bottom: 10px;" placeholder="03730043&#10;04199019"></textarea>
-                    <button onclick="doBulkQuery()" style="background: #0070f3; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">查詢</button>
+                    <button onclick="doBulkQuery(false)" style="background: #0070f3; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-right: 10px;">查詢全部</button>
+                    <button onclick="doBulkQuery(true)" style="background: #333; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">僅查詢資料庫</button>
                     <div id="loading" style="display:none; margin-top: 10px; color: #666;">查詢中...</div>
                     <textarea id="resultArea" rows="10" style="width: 100%; padding: 10px; margin-top: 10px; border: 1px solid #eaeaea; display:none;" readonly></textarea>
                 </div>
@@ -69,7 +71,7 @@ class handler(BaseHTTPRequestHandler):
                 </div>
 
                 <script>
-                    async function doBulkQuery() {
+                    async function doBulkQuery(skipGovt) {
                         const input = document.getElementById('bulkInput').value;
                         const ids = input.replace(/[\\n\\r]+/g, ",").split(",").map(x => x.trim()).filter(x => x);
                         
@@ -86,7 +88,7 @@ class handler(BaseHTTPRequestHandler):
                             const res = await fetch('/api', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ ids: ids })
+                                body: JSON.stringify({ ids: ids, skip_govt: skipGovt })
                             });
                             const result = await res.json();
                             const list = result.data || [];
@@ -114,7 +116,7 @@ class handler(BaseHTTPRequestHandler):
         found_in_govt = False
         govt_data = []
         
-        if id_param:
+        if id_param and not skip_govt_param:
             try:
                 # 經濟部商業司 API
                 govt_url = 'https://data.gcis.nat.gov.tw/od/data/api/9D17AE0D-09B5-4732-A8F4-81ADED04B679'
@@ -215,6 +217,7 @@ class handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(post_data.decode('utf-8'))
             ids = body.get('ids', [])
+            skip_govt = body.get('skip_govt', False)
             if not isinstance(ids, list):
                 raise ValueError("Format error: 'ids' must be a list")
             
@@ -229,34 +232,35 @@ class handler(BaseHTTPRequestHandler):
             
             # --- 步驟 1: 查詢政府 API (逐筆查詢) ---
             # 由於此 API 不支援 Business_Accounting_NO 的 OR 查詢，必須逐筆請求
-            for tax_id in ids:
-                try:
-                    govt_url = 'https://data.gcis.nat.gov.tw/od/data/api/9D17AE0D-09B5-4732-A8F4-81ADED04B679'
-                    params = {
-                        '$format': 'json',
-                        '$filter': f"Business_Accounting_NO eq {tax_id}",
-                        '$skip': 0,
-                        '$top': 1
-                    }
-                    # 逐筆查詢，timeout 不宜過長
-                    resp = requests.get(govt_url, params=params, timeout=4)
-                    
-                    if resp.status_code == 200:
-                        j_data = resp.json()
-                        if isinstance(j_data, list) and len(j_data) > 0:
-                            item = j_data[0]
-                            comp_name = item.get('Company_Name') or item.get('Business_Name')
-                            
-                            # 確保有拿到名稱
-                            if comp_name:
-                                final_results[tax_id] = {
-                                    "統一編號": tax_id,
-                                    "單位名稱": comp_name,
-                                    "資料來源": "經濟部商業司"
-                                }
-                except Exception as e:
-                    print(f"Govt API Error ({tax_id}): {e}")
-                    pass
+            if not skip_govt:
+                for tax_id in ids:
+                    try:
+                        govt_url = 'https://data.gcis.nat.gov.tw/od/data/api/9D17AE0D-09B5-4732-A8F4-81ADED04B679'
+                        params = {
+                            '$format': 'json',
+                            '$filter': f"Business_Accounting_NO eq {tax_id}",
+                            '$skip': 0,
+                            '$top': 1
+                        }
+                        # 逐筆查詢，timeout 不宜過長
+                        resp = requests.get(govt_url, params=params, timeout=4)
+                        
+                        if resp.status_code == 200:
+                            j_data = resp.json()
+                            if isinstance(j_data, list) and len(j_data) > 0:
+                                item = j_data[0]
+                                comp_name = item.get('Company_Name') or item.get('Business_Name')
+                                
+                                # 確保有拿到名稱
+                                if comp_name:
+                                    final_results[tax_id] = {
+                                        "統一編號": tax_id,
+                                        "單位名稱": comp_name,
+                                        "資料來源": "經濟部商業司"
+                                    }
+                    except Exception as e:
+                        print(f"Govt API Error ({tax_id}): {e}")
+                        pass
             
             # --- 步驟 2: 查詢 Supabase (一次性優化) ---
             missing_ids = [x for x in ids if x not in final_results]
